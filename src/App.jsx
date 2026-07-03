@@ -63,6 +63,13 @@ function normalizePartner(transportadora, macroTp) {
   return String(transportadora || "N/A").trim();
 }
 
+// Classifica a transportadora da base "antes da entrega" entre malha própria (BulkyLog/Fulfillment) e terceiros
+function classifyOrigemAntes(partner) {
+  const up = String(partner || "").toUpperCase();
+  if (up.includes("BULKY") || up === "FULFILLMENT") return "BULKYLOG";
+  return "TERCEIRA";
+}
+
 function findCol(headers, candidates) {
   const norm = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const normHeaders = headers.map(norm);
@@ -180,6 +187,32 @@ function aggregate(rows) {
   const totalGeral = rowsAno.length;
 
   return { anoFoco, mesMin, mesMax, mesesPresentes, monthlyTotal, weeklyTotal, partnerTotals, ufTotals, totalGeral };
+}
+
+// Agregação genérica por categoria (2 grupos), com detalhamento mensal e semanal
+function aggregateByCategory(rows, categoryFn) {
+  const anos = Array.from(new Set(rows.map((r) => r[0]))).sort();
+  const anoFoco = anos.includes(2026) ? 2026 : anos[anos.length - 1];
+  const rowsAno = rows.filter((r) => r[0] === anoFoco);
+
+  const mesesPresentes = Array.from(new Set(rowsAno.map((r) => r[1]))).sort((a, b) => a - b);
+
+  const monthlyByCat = {};
+  const weeklyByCat = {};
+  rowsAno.forEach((r) => {
+    const c = categoryFn(r);
+    if (!monthlyByCat[c]) monthlyByCat[c] = {};
+    if (!weeklyByCat[c]) weeklyByCat[c] = {};
+    monthlyByCat[c][r[1]] = (monthlyByCat[c][r[1]] || 0) + 1;
+    weeklyByCat[c][r[2]] = (weeklyByCat[c][r[2]] || 0) + 1;
+  });
+
+  const totalByCat = {};
+  Object.keys(monthlyByCat).forEach((c) => {
+    totalByCat[c] = Object.values(monthlyByCat[c]).reduce((a, b) => a + b, 0);
+  });
+
+  return { anoFoco, mesesPresentes, monthlyByCat, weeklyByCat, totalByCat };
 }
 
 function pctVar(atual, anterior) {
@@ -337,8 +370,107 @@ function BrazilMap({ ufTotals, corBase, totalGeral }) {
   );
 }
 
+// ============ Comparação por categoria (2 grupos) — reutilizável ============
+function CategoryComparisonView({ agg, catA, catB, labelA, labelB, colorA, colorB }) {
+  const { mesesPresentes, monthlyByCat, weeklyByCat, totalByCat, anoFoco } = agg;
+  const totalA = totalByCat[catA] || 0;
+  const totalB = totalByCat[catB] || 0;
+  const totalGeral = totalA + totalB;
+
+  const mesMin = mesesPresentes[0];
+  const mesMax = mesesPresentes[mesesPresentes.length - 1];
+  const prevMonth = mesesPresentes[mesesPresentes.length - 2];
+  const periodoLabel = mesMin && mesMax
+    ? (mesMin === mesMax ? `${MESES[mesMin - 1]}/${anoFoco}` : `${MESES[mesMin - 1]}–${MESES[mesMax - 1]}/${anoFoco}`)
+    : "—";
+
+  const mA = monthlyByCat[catA] || {};
+  const mB = monthlyByCat[catB] || {};
+  const monthlyData = mesesPresentes.map((m) => ({ mes: MESES[m - 1], [labelA]: mA[m] || 0, [labelB]: mB[m] || 0 }));
+
+  const wA = weeklyByCat[catA] || {};
+  const wB = weeklyByCat[catB] || {};
+  const semanas = Array.from(new Set([...Object.keys(wA), ...Object.keys(wB)].map((s) => parseInt(s, 10)))).sort((a, b) => a - b);
+  const weeklyData = semanas.map((s) => ({ semana: "S" + s, [labelA]: wA[s] || 0, [labelB]: wB[s] || 0 }));
+
+  const varA = mesMax ? pctVar(mA[mesMax] || 0, prevMonth ? (mA[prevMonth] || 0) : null) : null;
+  const varB = mesMax ? pctVar(mB[mesMax] || 0, prevMonth ? (mB[prevMonth] || 0) : null) : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        <KpiCard label={`Total ${labelA}`} value={totalA.toLocaleString("pt-BR")} accent={colorA}
+          sub={<span style={{ fontSize: 12.5, color: C.cinzaTexto }}>{totalGeral > 0 ? ((totalA / totalGeral) * 100).toFixed(0) + "% do total" : ""}</span>} />
+        <KpiCard label={`Total ${labelB}`} value={totalB.toLocaleString("pt-BR")} accent={colorB}
+          sub={<span style={{ fontSize: 12.5, color: C.cinzaTexto }}>{totalGeral > 0 ? ((totalB / totalGeral) * 100).toFixed(0) + "% do total" : ""}</span>} />
+        <KpiCard label={`Variação ${MESES[(mesMax || 1) - 1]} — ${labelA}`} value={mesMax ? (mA[mesMax] || 0).toLocaleString("pt-BR") : "—"} accent={colorA} sub={<VarBadge value={varA} />} />
+        <KpiCard label={`Variação ${MESES[(mesMax || 1) - 1]} — ${labelB}`} value={mesMax ? (mB[mesMax] || 0).toLocaleString("pt-BR") : "—"} accent={colorB} sub={<VarBadge value={varB} />} />
+      </div>
+
+      <div style={{ background: C.cinzaCard, border: `1px solid ${C.cinzaBorda}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 12 }}>Comparação Mensal — {periodoLabel}</div>
+        <ResponsiveContainer width="100%" height={270}>
+          <BarChart data={monthlyData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.cinzaBorda} vertical={false} />
+            <XAxis dataKey="mes" tick={{ fontSize: 12.5, fill: C.cinzaTexto }} axisLine={{ stroke: C.cinzaBorda }} tickLine={false} />
+            <YAxis tick={{ fontSize: 12.5, fill: C.cinzaTexto }} axisLine={false} tickLine={false} />
+            <Tooltip contentStyle={{ borderRadius: 8, border: `1px solid ${C.cinzaBorda}`, fontSize: 13 }} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey={labelA} fill={colorA} radius={[4, 4, 0, 0]} />
+            <Bar dataKey={labelB} fill={colorB} radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div style={{ background: C.cinzaCard, border: `1px solid ${C.cinzaBorda}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 12 }}>Comparação Semanal — {periodoLabel}</div>
+        <ResponsiveContainer width="100%" height={230}>
+          <LineChart data={weeklyData}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.cinzaBorda} vertical={false} />
+            <XAxis dataKey="semana" tick={{ fontSize: 10.5, fill: C.cinzaTexto }} axisLine={{ stroke: C.cinzaBorda }} tickLine={false} interval={1} />
+            <YAxis tick={{ fontSize: 12.5, fill: C.cinzaTexto }} axisLine={false} tickLine={false} />
+            <Tooltip contentStyle={{ borderRadius: 8, border: `1px solid ${C.cinzaBorda}`, fontSize: 13 }} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Line type="monotone" dataKey={labelA} stroke={colorA} strokeWidth={2.2} dot={{ r: 2 }} />
+            <Line type="monotone" dataKey={labelB} stroke={colorB} strokeWidth={2.2} dot={{ r: 2 }} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div style={{ background: C.cinzaCard, border: `1px solid ${C.cinzaBorda}`, borderRadius: 12, padding: 18, overflowX: "auto" }}>
+        <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 12 }}>Tabela Mensal — {labelA} x {labelB}</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ borderBottom: `2px solid ${C.cinzaBorda}` }}>
+              <th style={{ textAlign: "left", padding: "8px 6px" }}>Mês</th>
+              <th style={{ textAlign: "right", padding: "8px 6px" }}>{labelA}</th>
+              <th style={{ textAlign: "right", padding: "8px 6px" }}>{labelB}</th>
+              <th style={{ textAlign: "right", padding: "8px 6px" }}>% {labelA}</th>
+              <th style={{ textAlign: "right", padding: "8px 6px" }}>% {labelB}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {monthlyData.map((r, i) => {
+              const tot = (r[labelA] || 0) + (r[labelB] || 0);
+              return (
+                <tr key={r.mes} style={{ borderBottom: `1px solid ${C.cinzaBorda}`, background: i % 2 === 0 ? C.cinzaFundo : "transparent" }}>
+                  <td style={{ padding: "7px 6px", fontWeight: 600 }}>{r.mes}</td>
+                  <td style={{ textAlign: "right", padding: "7px 6px" }}>{r[labelA].toLocaleString("pt-BR")}</td>
+                  <td style={{ textAlign: "right", padding: "7px 6px" }}>{r[labelB].toLocaleString("pt-BR")}</td>
+                  <td style={{ textAlign: "right", padding: "7px 6px", color: C.cinzaTexto }}>{tot > 0 ? ((r[labelA] / tot) * 100).toFixed(0) + "%" : "—"}</td>
+                  <td style={{ textAlign: "right", padding: "7px 6px", color: C.cinzaTexto }}>{tot > 0 ? ((r[labelB] / tot) * 100).toFixed(0) + "%" : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ============ Bloco reutilizável: Visão Geral / Ranking / Estado / Tabela para um dataset ============
-function DatasetView({ agg, subtab, setSubtab, corPrincipal, tituloVolume }) {
+function DatasetView({ agg, subtab, setSubtab, corPrincipal, tituloVolume, categoryView }) {
   const { mesesPresentes, monthlyTotal, weeklyTotal, partnerTotals, ufTotals, totalGeral, anoFoco, mesMin, mesMax } = agg;
   const lastMonth = mesMax;
   const prevMonth = mesesPresentes[mesesPresentes.length - 2];
@@ -379,8 +511,14 @@ function DatasetView({ agg, subtab, setSubtab, corPrincipal, tituloVolume }) {
           sub={<span style={{ fontSize: 12.5, color: C.cinzaTexto }}>{liderAtual ? `${liderAtual.total.toLocaleString("pt-BR")} (${((liderAtual.total / totalGeral) * 100).toFixed(0)}%)` : ""}</span>} />
       </div>
 
-      <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `1px solid ${C.cinzaBorda}` }}>
-        {[["visao", "Visão Geral"], ["parceiros", "Por Transportadora"], ["mapa", "🗺️ Mapa por Estado"], ["tabela", "Tabela Completa"]].map(([key, label]) => (
+      <div style={{ display: "flex", gap: 4, marginBottom: 16, borderBottom: `1px solid ${C.cinzaBorda}`, flexWrap: "wrap" }}>
+        {[
+          ["visao", "Visão Geral"],
+          ["parceiros", "Por Transportadora"],
+          ["mapa", "🗺️ Mapa por Estado"],
+          ...(categoryView ? [["categoria", categoryView.tabLabel]] : []),
+          ["tabela", "Tabela Completa"],
+        ].map(([key, label]) => (
           <button key={key} onClick={() => setSubtab(key)} style={{
             padding: "10px 16px", border: "none", background: "transparent", cursor: "pointer", fontSize: 13.5, fontWeight: 600,
             color: subtab === key ? corPrincipal : C.cinzaTexto,
@@ -460,6 +598,8 @@ function DatasetView({ agg, subtab, setSubtab, corPrincipal, tituloVolume }) {
         </div>
       )}
 
+      {subtab === "categoria" && categoryView && categoryView.node}
+
       {subtab === "tabela" && (
         <div style={{ background: C.cinzaCard, border: `1px solid ${C.cinzaBorda}`, borderRadius: 12, padding: 18, overflowX: "auto" }}>
           <div style={{ fontWeight: 700, fontSize: 14.5, marginBottom: 12 }}>Tabela Completa — {periodoLabel}</div>
@@ -515,6 +655,17 @@ export default function App() {
 
   const aggAntes = useMemo(() => aggregate(rowsAntes), [rowsAntes]);
   const aggDepois = useMemo(() => aggregate(rowsDepoisFiltradas), [rowsDepoisFiltradas]);
+
+  // Antes da entrega: Transportadora Terceira x BulkyLog (malha própria)
+  const aggAntesCategoria = useMemo(
+    () => aggregateByCategory(rowsAntes, (r) => classifyOrigemAntes(r[3])),
+    [rowsAntes]
+  );
+  // Pós entrega: Parça x Não Parça (usa a base completa, independente do toggle "Somente Parça")
+  const aggDepoisCategoria = useMemo(
+    () => aggregateByCategory(rowsDepois, (r) => (r[4] === "PARCA" ? "PARCA" : "NAO_PARCA")),
+    [rowsDepois]
+  );
 
   const handleFileAntes = useCallback((file) => {
     if (!file) return;
@@ -648,7 +799,19 @@ export default function App() {
               <input type="file" accept=".csv" style={{ display: "none" }} onChange={(e) => handleFileAntes(e.target.files[0])} />
             </label>
           </div>
-          <DatasetView agg={aggAntes} subtab={subtabAntes} setSubtab={setSubtabAntes} corPrincipal={C.laranja} tituloVolume="Antes da Entrega" />
+          <DatasetView agg={aggAntes} subtab={subtabAntes} setSubtab={setSubtabAntes} corPrincipal={C.laranja} tituloVolume="Antes da Entrega"
+            categoryView={{
+              tabLabel: "🏷️ Terceira x BulkyLog",
+              node: (
+                <CategoryComparisonView
+                  agg={aggAntesCategoria}
+                  catA="TERCEIRA" catB="BULKYLOG"
+                  labelA="Transportadora Terceira" labelB="BulkyLog (Malha Própria)"
+                  colorA={C.laranja} colorB={C.azul}
+                />
+              ),
+            }}
+          />
         </div>
       )}
 
@@ -667,7 +830,19 @@ export default function App() {
               </label>
             </div>
           </div>
-          <DatasetView agg={aggDepois} subtab={subtabDepois} setSubtab={setSubtabDepois} corPrincipal={C.azul} tituloVolume="Pós Entrega" />
+          <DatasetView agg={aggDepois} subtab={subtabDepois} setSubtab={setSubtabDepois} corPrincipal={C.azul} tituloVolume="Pós Entrega"
+            categoryView={{
+              tabLabel: "🏷️ Parça x Não Parça",
+              node: (
+                <CategoryComparisonView
+                  agg={aggDepoisCategoria}
+                  catA="PARCA" catB="NAO_PARCA"
+                  labelA="Parça" labelB="Não Parça"
+                  colorA={C.verde} colorB={C.cinzaTexto}
+                />
+              ),
+            }}
+          />
         </div>
       )}
 
